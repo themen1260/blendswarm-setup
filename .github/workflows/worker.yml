@@ -1,0 +1,79 @@
+name: Worker validation and release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install -r requirements.txt
+      - run: python -m compileall -q src/python scripts tests
+      - run: python src/python/worker_client.py --help
+      - name: Validate Linux installer syntax
+        if: runner.os == 'Linux'
+        run: bash -n install.sh
+      - name: Validate PowerShell installer syntax
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $files = @("install.ps1", "start-worker.ps1")
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $file), [ref]$tokens, [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) { throw "$file has syntax errors: $errors" }
+          }
+      - run: python -m unittest discover -s tests -v
+
+  package:
+    name: Build worker bundles
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python scripts/build_release.py --output dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blendswarm-worker-bundles
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: blendswarm-worker-bundles
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/*
