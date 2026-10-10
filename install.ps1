@@ -4,11 +4,15 @@
 param(
     [Parameter(Mandatory = $true)][string]$Server,
     [string]$Token,
+    [string]$DiscoveryCode,
     [string]$Dir = "$env:USERPROFILE\.blendswarm-worker"
 )
 $ErrorActionPreference = "Stop"
 $Server = $Server.TrimEnd('/')
-if ([string]::IsNullOrWhiteSpace($Token)) {
+if (-not [string]::IsNullOrWhiteSpace($Token) -and -not [string]::IsNullOrWhiteSpace($DiscoveryCode)) {
+    throw "Use either -Token or -DiscoveryCode, not both."
+}
+if ([string]::IsNullOrWhiteSpace($Token) -and [string]::IsNullOrWhiteSpace($DiscoveryCode)) {
     $secureToken = Read-Host "Worker token (input hidden)" -AsSecureString
     $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureToken)
     try {
@@ -17,7 +21,9 @@ if ([string]::IsNullOrWhiteSpace($Token)) {
         [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer)
     }
 }
-if ([string]::IsNullOrWhiteSpace($Token)) { throw "Worker token cannot be empty." }
+if ([string]::IsNullOrWhiteSpace($Token) -and [string]::IsNullOrWhiteSpace($DiscoveryCode)) {
+    throw "A worker token or discovery code is required."
+}
 
 $pythonCommand = Get-Command py -ErrorAction SilentlyContinue
 if ($pythonCommand) {
@@ -69,31 +75,40 @@ if ($LASTEXITCODE -ne 0) { throw "Could not update pip." }
 & $venvPython -m pip install --disable-pip-version-check -q -r "$Dir\requirements.txt"
 if ($LASTEXITCODE -ne 0) { throw "Could not install worker dependencies." }
 
-$secureToken = ConvertTo-SecureString -String $Token -AsPlainText -Force
-ConvertFrom-SecureString -SecureString $secureToken | Set-Content "$Dir\token.credential" -Encoding ASCII
+if (-not [string]::IsNullOrWhiteSpace($DiscoveryCode)) {
+    & $venvPython "$Dir\worker_client.py" --server $Server --discovery-code $DiscoveryCode --enroll-only
+    if ($LASTEXITCODE -ne 0) { throw "Worker auto-enrollment failed." }
+} else {
+    $secureToken = ConvertTo-SecureString -String $Token -AsPlainText -Force
+    ConvertFrom-SecureString -SecureString $secureToken | Set-Content "$Dir\token.credential" -Encoding ASCII
+}
 $Token = $null
+$DiscoveryCode = $null
 
 $runFile = "$Dir\run-worker.ps1"
 @"
 `$ErrorActionPreference = "Stop"
-`$secureToken = Get-Content "$Dir\token.credential" -Raw | ConvertTo-SecureString
-`$pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR(`$secureToken)
-try {
-    `$token = [Runtime.InteropServices.Marshal]::PtrToStringBSTR(`$pointer)
-    `$oldServer = `$env:RENDERSWARM_SERVER
-    `$oldToken = `$env:RENDERSWARM_TOKEN
+`$token = `$null
+if (Test-Path "$Dir\token.credential") {
+    `$secureToken = Get-Content "$Dir\token.credential" -Raw | ConvertTo-SecureString
+    `$pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR(`$secureToken)
     try {
-        `$env:RENDERSWARM_SERVER = "$Server"
-        `$env:RENDERSWARM_TOKEN = `$token
-        & "$venvPython" "$Dir\worker_client.py" --blender "$blender" @args
-        if (`$LASTEXITCODE -ne 0) { throw "Worker process exited with code `$LASTEXITCODE." }
+        `$token = [Runtime.InteropServices.Marshal]::PtrToStringBSTR(`$pointer)
     } finally {
-        `$env:RENDERSWARM_SERVER = `$oldServer
-        `$env:RENDERSWARM_TOKEN = `$oldToken
-        `$token = `$null
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR(`$pointer)
     }
+}
+`$oldServer = `$env:RENDERSWARM_SERVER
+`$oldToken = `$env:RENDERSWARM_TOKEN
+try {
+    `$env:RENDERSWARM_SERVER = "$Server"
+    `$env:RENDERSWARM_TOKEN = `$token
+    & "$venvPython" "$Dir\worker_client.py" --blender "$blender" @args
+    if (`$LASTEXITCODE -ne 0) { throw "Worker process exited with code `$LASTEXITCODE." }
 } finally {
-    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR(`$pointer)
+    `$env:RENDERSWARM_SERVER = `$oldServer
+    `$env:RENDERSWARM_TOKEN = `$oldToken
+    `$token = `$null
 }
 "@ | Set-Content $runFile -Encoding UTF8
 

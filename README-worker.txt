@@ -38,6 +38,26 @@ supported. Install Blender 3.6+ and Python 3.9+ before setup:
    On a headless server, enable systemd lingering for your account if the worker
    must start before an interactive login: sudo loginctl enable-linger USERNAME.
 
+Auto-discovery / enrollment
+--------------------------
+
+In My Workers > Add Worker > Auto-Discovery, create a temporary code. On each
+Windows/Linux computer on your network, extract this bundle and run:
+
+Windows PowerShell:
+  .\install.ps1 -Server https://blendswarm.com -DiscoveryCode YOUR_CODE
+  & "$env:USERPROFILE\.blendswarm-worker\run-worker.ps1"
+
+Linux:
+  bash install.sh --server https://blendswarm.com --discovery-code YOUR_CODE
+  ~/.blendswarm-worker/run.sh
+
+The code expires after 15 minutes and can enroll at most 10 computers. Share it
+only with computers you control. Each computer reports its hostname, operating
+system, CPU, memory, and detected GPUs; the installer stores its individual
+worker credential locally. This is an enrollment handshake, not a browser-based
+LAN port scan. Each computer must run the worker installer to be detected.
+
 The platform-specific downloads are blendswarm-worker-windows.zip and
 blendswarm-worker-linux.tar.gz. Their installers use the files in the bundle;
 they do not bundle Blender or Python. Do not paste worker tokens into public

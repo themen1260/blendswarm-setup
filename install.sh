@@ -7,6 +7,7 @@ umask 077
 
 SERVER=""
 TOKEN=""
+DISCOVERY_CODE=""
 SERVICE=0
 DIR="$HOME/.blendswarm-worker"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,17 +15,22 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --server) [ "$#" -ge 2 ] || { echo "Missing value for --server" >&2; exit 2; }; SERVER="${2%/}"; shift 2 ;;
     --token) [ "$#" -ge 2 ] || { echo "Missing value for --token" >&2; exit 2; }; TOKEN="$2"; shift 2 ;;
+    --discovery-code) [ "$#" -ge 2 ] || { echo "Missing value for --discovery-code" >&2; exit 2; }; DISCOVERY_CODE="$2"; shift 2 ;;
     --service) SERVICE=1; shift ;;
     --dir) [ "$#" -ge 2 ] || { echo "Missing value for --dir" >&2; exit 2; }; DIR="$2"; shift 2 ;;
     -h|--help)
-      echo "Usage: bash install.sh --server URL [--token TOKEN] [--service] [--dir PATH]"
+      echo "Usage: bash install.sh --server URL [--token TOKEN | --discovery-code CODE] [--service] [--dir PATH]"
       exit 0
       ;;
     *) echo "Unknown option: $1" >&2; exit 2 ;;
   esac
 done
 [ -n "$SERVER" ] || { echo "--server is required." >&2; exit 2; }
-if [ -z "$TOKEN" ]; then
+if [ -n "$TOKEN" ] && [ -n "$DISCOVERY_CODE" ]; then
+  echo "Use either --token or --discovery-code, not both." >&2
+  exit 2
+fi
+if [ -z "$TOKEN" ] && [ -z "$DISCOVERY_CODE" ]; then
   [ -t 0 ] || { echo "A worker token is required; rerun interactively or pass --token." >&2; exit 2; }
   read -r -s -p "Worker token (input hidden): " TOKEN
   printf '\n'
@@ -61,6 +67,10 @@ python3 -m venv "$DIR/venv" || {
 "$DIR/venv/bin/python" -m pip install --disable-pip-version-check -q --upgrade pip
 "$DIR/venv/bin/python" -m pip install --disable-pip-version-check -q -r "$DIR/requirements.txt"
 
+if [ -n "$DISCOVERY_CODE" ]; then
+  "$DIR/venv/bin/python" "$DIR/worker_client.py" --server "$SERVER" --discovery-code "$DISCOVERY_CODE" --enroll-only
+  TOKEN=""
+fi
 printf 'export RENDERSWARM_SERVER=%q\nexport RENDERSWARM_TOKEN=%q\nexport BLENDER_PATH=%q\n' \
   "$SERVER" "$TOKEN" "$BLENDER" > "$DIR/worker.env"
 chmod 600 "$DIR/worker.env"

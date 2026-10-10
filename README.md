@@ -14,6 +14,14 @@ Blender itself is installed separately and is not bundled in the downloads.
 
 Do not post the worker token in an issue, screenshot, URL, or shell command.
 
+For several computers on the same network, use **My Workers > Add Worker >
+Auto-Discovery** to create a short-lived enrollment code. Pass it to the worker
+installer on each computer with `-DiscoveryCode CODE` (Windows) or
+`--discovery-code CODE` (Linux). The code expires after 15 minutes and can
+register up to 10 computers. Share it only with machines you control. The
+website cannot scan private LAN traffic; each computer must run the installer
+to enroll and appear in the dashboard.
+
 ## Windows quick start
 
 1. Download and extract `blendswarm-worker-windows.zip` from the repository's

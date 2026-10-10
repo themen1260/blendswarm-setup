@@ -21,11 +21,22 @@ class BuildReleaseTests(unittest.TestCase):
             self.assertIn("blendswarm-worker/install.ps1", windows_files)
             self.assertIn("blendswarm-worker/start-worker.cmd", windows_files)
             self.assertIn("blendswarm-worker/worker_client.py", windows_files)
+            with zipfile.ZipFile(windows) as archive:
+                self.assertIn(
+                    b"-DiscoveryCode",
+                    archive.read("blendswarm-worker/install.ps1"),
+                )
+                self.assertIn(
+                    b"--enroll-only",
+                    archive.read("blendswarm-worker/worker_client.py"),
+                )
 
             with tarfile.open(linux, "r:gz") as archive:
                 linux_files = set(archive.getnames())
             self.assertIn("blendswarm-worker/install.sh", linux_files)
             self.assertIn("blendswarm-worker/worker_client.py", linux_files)
+            with tarfile.open(linux, "r:gz") as archive:
+                self.assertIn(b"--discovery-code", archive.extractfile("blendswarm-worker/install.sh").read())
 
             with zipfile.ZipFile(source) as archive:
                 source_files = set(archive.namelist())

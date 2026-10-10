@@ -9,9 +9,11 @@ uploads the result and reports progress. Usage:
 import argparse
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import os
+import platform
 import re
 import shutil
 import signal
@@ -34,7 +36,7 @@ try:
 except Exception:  # GPU monitoring is optional
     GPUtil = None
 
-VERSION = "2.1.0"
+VERSION = "2.3.0"
 ALLOWED_ENGINES = {"CYCLES", "BLENDER_EEVEE", "BLENDER_EEVEE_NEXT", "BLENDER_WORKBENCH"}
 FRAME_RE = re.compile(r"Fra:(\d+)")
 
@@ -43,6 +45,25 @@ logger = logging.getLogger("worker")
 
 MAGIC = b"RSE1"
 MIN_RAM_FREE = 512 * 1024 * 1024
+IDLE_CPU_LIMIT_PERCENT = 30.0
+IDLE_GPU_LIMIT_PERCENT = 20.0
+IDLE_CONFIRMATION_SECONDS = 300
+
+
+class IdleGate:
+    def __init__(self, confirmation_seconds: int = IDLE_CONFIRMATION_SECONDS):
+        self.confirmation_seconds = confirmation_seconds
+        self.idle_since: Optional[float] = None
+
+    def update(self, cpu_percent: float, gpu_loads: Optional[list], now: Optional[float] = None) -> bool:
+        now = time.monotonic() if now is None else now
+        gpu_idle = gpu_loads is None or not gpu_loads or all(load < IDLE_GPU_LIMIT_PERCENT for load in gpu_loads)
+        if cpu_percent >= IDLE_CPU_LIMIT_PERCENT or not gpu_idle:
+            self.idle_since = None
+            return False
+        if self.idle_since is None:
+            self.idle_since = now
+        return now - self.idle_since >= self.confirmation_seconds
 
 
 def _read_exact(read, n: int) -> bytes:
@@ -89,6 +110,75 @@ def normalize_server(url: str) -> str:
     return url
 
 
+def _worker_token_path(server: str) -> Path:
+    if os.name == "nt":
+        root = Path(os.getenv("APPDATA") or Path.home() / "AppData" / "Roaming") / "BlendSwarm"
+    else:
+        root = Path(os.getenv("XDG_CONFIG_HOME") or Path.home() / ".config") / "blendswarm"
+    root.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(normalize_server(server).encode("utf-8")).hexdigest()[:16]
+    return root / f"worker-{digest}.json"
+
+
+def _load_worker_token(server: str) -> Optional[str]:
+    path = _worker_token_path(server)
+    if not path.exists():
+        return None
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Could not read saved worker credentials at {path}: {exc}") from exc
+    if config.get("server") != normalize_server(server) or not config.get("token"):
+        raise RuntimeError(f"Saved worker credentials at {path} are invalid; remove that file and pair again.")
+    return config["token"]
+
+
+def _save_worker_token(server: str, token: str) -> None:
+    path = _worker_token_path(server)
+    path.write_text(json.dumps({"server": normalize_server(server), "token": token}), encoding="utf-8")
+    if os.name != "nt":
+        path.chmod(0o600)
+
+
+def enroll_worker(server: str, code: str) -> str:
+    hardware = {
+        "code": code,
+        "name": socket.gethostname() or "Discovered worker",
+        "cpu_cores": psutil.cpu_count(logical=True) or 1,
+        "memory_gb": max(1, round(psutil.virtual_memory().total / 2**30)),
+        "storage_gb": max(1, round(psutil.disk_usage(tempfile.gettempdir()).free / 2**30)),
+        "gpu_names": [],
+        "os": f"{platform.system()} {platform.release()}",
+    }
+    if GPUtil:
+        try:
+            hardware["gpu_names"] = [gpu.name for gpu in GPUtil.getGPUs()]
+        except Exception as exc:
+            logger.warning("Could not detect GPUs during auto-enrollment: %s", exc)
+    try:
+        response = requests.post(
+            f"{normalize_server(server)}/api/workers/discovery/enroll",
+            json=hardware,
+            timeout=20,
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Could not reach the BlendSwarm server to enroll this worker: {exc}") from exc
+    if response.status_code >= 400:
+        try:
+            detail = response.json().get("detail", response.text)
+        except ValueError:
+            detail = response.text
+        raise RuntimeError(f"Worker enrollment failed: {detail}")
+    result = response.json()
+    token = result.get("worker_token")
+    if not token:
+        raise RuntimeError("Worker enrollment response did not include a worker token.")
+    _save_worker_token(server, token)
+    print(f"Registered worker '{result.get('name', hardware['name'])}' (ID {result.get('worker_id')}).")
+    print(f"Saved its credential securely for future starts: {_worker_token_path(server)}")
+    return token
+
+
 def safe_extract(archive: Path, dest: Path) -> None:
     dest = dest.resolve()
     with zipfile.ZipFile(archive) as zf:
@@ -102,7 +192,7 @@ def safe_extract(archive: Path, dest: Path) -> None:
 class Worker:
     def __init__(
         self, server: str, token: str, blender: str, workdir: Path,
-        max_job_seconds: int, threads: int = 0,
+        max_job_seconds: int, threads: int = 0, idle_only: bool = True,
     ):
         self.http_base = normalize_server(server)
         self.ws_url = self.http_base.replace("https://", "wss://", 1).replace("http://", "ws://", 1) + "/ws"
@@ -118,6 +208,18 @@ class Worker:
         self.proc: Optional[subprocess.Popen] = None
         self.cancelled = False
         self.heartbeat_interval = 30
+        self.idle_only = idle_only
+        self.idle_gate = IdleGate()
+        self.available_for_jobs = not idle_only
+
+    def gpu_loads(self) -> Optional[list]:
+        if not GPUtil:
+            return None
+        try:
+            devices = GPUtil.getGPUs()
+            return [float(gpu.load) * 100 for gpu in devices]
+        except Exception:
+            return None
 
     # ---------- helpers ----------
     def headers(self) -> Dict[str, str]:
@@ -148,9 +250,15 @@ class Worker:
             try:
                 async with websockets.connect(self.ws_url, ping_interval=20, ping_timeout=20, max_size=None) as ws:
                     self.ws = ws
+                    metrics = await asyncio.to_thread(self.metrics)
+                    if self.idle_only:
+                        self.available_for_jobs = self.idle_gate.update(
+                            metrics["cpu_percent"], self.gpu_loads()
+                        )
                     await ws.send(json.dumps({
                         "type": "register", "client_type": "worker", "worker_token": self.token,
                         "version": VERSION, "host": socket.gethostname(),
+                        "available": self.available_for_jobs,
                     }))
                     first = json.loads(await ws.recv())
                     if first.get("type") != "connection_established":
@@ -174,8 +282,19 @@ class Worker:
 
     async def heartbeat_loop(self) -> None:
         while True:
-            await self.send({"type": "heartbeat", "metrics": self.metrics()})
-            await asyncio.sleep(self.heartbeat_interval)
+            metrics = await asyncio.to_thread(self.metrics)
+            if self.idle_only:
+                was_available = self.available_for_jobs
+                self.available_for_jobs = self.idle_gate.update(metrics["cpu_percent"], self.gpu_loads())
+                if was_available != self.available_for_jobs:
+                    state = "available for jobs" if self.available_for_jobs else "paused while the computer is in use"
+                    logger.info("Worker scheduling state changed: %s", state)
+            await self.send({
+                "type": "heartbeat",
+                "metrics": metrics,
+                "available": self.available_for_jobs,
+            })
+            await asyncio.sleep(10 if self.idle_only else self.heartbeat_interval)
 
     async def listen(self) -> None:
         async for raw in self.ws:
@@ -455,21 +574,38 @@ def main() -> None:
     p = argparse.ArgumentParser(description="BlendSwarm worker client")
     p.add_argument("--server", default=os.getenv("RENDERSWARM_SERVER", os.getenv("RENDERPOOL_SERVER")), help="e.g. https://your-domain.com")
     p.add_argument("--token", default=os.getenv("RENDERSWARM_TOKEN", os.getenv("RENDERPOOL_TOKEN")), help="Worker token from the dashboard")
+    p.add_argument("--discovery-code", help="auto-register this computer using a short-lived code from the dashboard")
+    p.add_argument("--enroll-only", action="store_true", help="register this computer and exit without starting its worker")
     p.add_argument("--blender", default=os.getenv("BLENDER_PATH") or shutil.which("blender") or "blender")
     p.add_argument("--workdir", default=os.getenv("RENDERSWARM_WORKDIR") or os.getenv("RENDERPOOL_WORKDIR") or tempfile.gettempdir())
     p.add_argument("--require-ram", action="store_true",
                    help="refuse jobs when the decrypted scene cannot be kept on a RAM disk (/dev/shm)")
     p.add_argument("--max-job-hours", type=float, default=12.0)
+    p.add_argument("--always-on", action="store_true",
+                   help="accept jobs immediately without waiting for the machine to be idle for five minutes")
     p.add_argument("--threads", type=int, default=0,
                    help="maximum Blender render threads (0 lets Blender decide)")
     p.add_argument("--test", action="store_true", help="run a performance test, upload the result and exit")
     p.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     a = p.parse_args()
-    if not a.server or not a.token:
-        p.error("--server and --token are required")
+    if not a.server:
+        p.error("--server is required")
+    if a.token and a.discovery_code:
+        p.error("use either --token or --discovery-code, not both")
     if a.threads < 0:
         p.error("--threads cannot be negative")
     logger.setLevel(a.log_level)
+    if not a.token:
+        try:
+            a.token = enroll_worker(a.server, a.discovery_code) if a.discovery_code else _load_worker_token(a.server)
+        except RuntimeError as exc:
+            p.error(str(exc))
+        if not a.token:
+            p.error("provide --token or --discovery-code, or pair this computer from the dashboard")
+    if a.enroll_only:
+        if not a.discovery_code:
+            p.error("--enroll-only requires --discovery-code")
+        return
     if shutil.which(a.blender) is None and not Path(a.blender).exists():
         p.error(f"Blender not found at '{a.blender}'. Install Blender or pass --blender /path/to/blender")
     workdir = Path(a.workdir)
@@ -479,7 +615,10 @@ def main() -> None:
         run_test(a.server, a.token, a.blender, workdir)
         return
 
-    worker = Worker(a.server, a.token, a.blender, workdir, int(a.max_job_hours * 3600), a.threads)
+    worker = Worker(
+        a.server, a.token, a.blender, workdir, int(a.max_job_hours * 3600),
+        a.threads, idle_only=not a.always_on,
+    )
     worker.require_ram = a.require_ram
     try:
         asyncio.run(worker.run())

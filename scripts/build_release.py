@@ -57,6 +57,7 @@ def build(output_dir: Path) -> list[Path]:
             ROOT / "LICENSE",
             ROOT / "scripts/build_release.py",
             ROOT / "tests/test_build_release.py",
+            ROOT / "tests/test_worker_discovery.py",
             ROOT / ".github/workflows/worker.yml",
         ):
             archive.write(path, arcname=f"blendswarm-setup/{path.relative_to(ROOT)}")
