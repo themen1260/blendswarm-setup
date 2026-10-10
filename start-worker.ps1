@@ -23,8 +23,15 @@ try {
         throw "Worker token cannot be empty."
     }
 
-    Write-Host "`nInstalling the worker. Keep this window open..." -ForegroundColor Yellow
-    & "$PSScriptRoot\install.ps1" -Server $server -Token $token
+    $autoStartAnswer = Read-Host "`nStart the worker automatically each time you sign in? [y/N]"
+    $autoStart = $autoStartAnswer -match '^(y|yes)$'
+    $installArgs = @("-Server", $server, "-Token", $token)
+    if ($autoStart) {
+        $installArgs += "-AutoStart"
+    }
+
+    Write-Host "`nInstalling the worker..." -ForegroundColor Yellow
+    & "$PSScriptRoot\install.ps1" @installArgs
     if (-not $?) {
         throw "Worker installer failed. Review the error shown above."
     }
@@ -38,10 +45,17 @@ try {
         }
     }
 
-    Write-Host "`nStarting worker. Leave this window open; press Ctrl+C to stop." -ForegroundColor Green
-    & $runScript
-    if (-not $?) {
-        throw "Worker exited with an error. Review the error shown above."
+    if ($autoStart) {
+        Start-ScheduledTask -TaskName "BlendSwarmWorker"
+        Write-Host "`nWorker is running in the background and will start at each Windows sign-in." -ForegroundColor Green
+        Write-Host "It waits until CPU/GPU use is low for five minutes before accepting a job."
+        Write-Host "Check it in Task Scheduler or BlendSwarm > My Workers."
+    } else {
+        Write-Host "`nStarting worker. Leave this window open; press Ctrl+C to stop." -ForegroundColor Green
+        & $runScript
+        if (-not $?) {
+            throw "Worker exited with an error. Review the error shown above."
+        }
     }
 } catch {
     Write-Host "`nSETUP/RUN ERROR: $($_.Exception.Message)" -ForegroundColor Red

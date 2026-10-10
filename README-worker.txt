@@ -18,7 +18,9 @@ supported. Install Blender 3.6+ and Python 3.9+ before setup:
    - Open the extracted folder and double-click start-worker.cmd.
    - Press Enter to accept https://blendswarm.com.
    - Paste the worker token at the hidden prompt; the characters do not appear.
-   - Accept the optional benchmark. Keep the PowerShell window open while it runs.
+   - Accept the optional benchmark.
+   - Choose automatic start at Windows sign-in to run the worker in the
+     background. Otherwise, keep the PowerShell window open while it runs.
    - Press Ctrl+C to stop the worker. Errors remain visible in the window.
    Alternative (PowerShell, from the extracted folder):
    Set-ExecutionPolicy -Scope Process Bypass
@@ -46,18 +48,22 @@ In My Workers > Add Worker > Auto-Discovery, create a temporary code. On each
 Windows/Linux computer on your network, extract this bundle and run:
 
 Windows PowerShell:
-  .\install.ps1 -Server https://blendswarm.com -DiscoveryCode YOUR_CODE
-  & "$env:USERPROFILE\.blendswarm-worker\run-worker.ps1"
+  .\install.ps1 -Server https://blendswarm.com -DiscoveryCode YOUR_CODE -AutoStart
+  Start-ScheduledTask -TaskName BlendSwarmWorker
 
 Linux:
-  bash install.sh --server https://blendswarm.com --discovery-code YOUR_CODE
-  ~/.blendswarm-worker/run.sh
+  bash install.sh --server https://blendswarm.com --discovery-code YOUR_CODE --service
 
 The code expires after 15 minutes and can enroll at most 10 computers. Share it
 only with computers you control. Each computer reports its hostname, operating
 system, CPU, memory, and detected GPUs; the installer stores its individual
 worker credential locally. This is an enrollment handshake, not a browser-based
 LAN port scan. Each computer must run the worker installer to be detected.
+
+Workers start automatically at sign-in only if the Windows auto-start option
+is enabled or the Linux installer is run with `--service`. Workers pause new
+assignments until CPU/GPU usage remains low for five minutes; a powered-off,
+sleeping, busy, or disconnected computer cannot accept jobs.
 
 The platform-specific downloads are blendswarm-worker-windows.zip and
 blendswarm-worker-linux.tar.gz. Their installers use the files in the bundle;

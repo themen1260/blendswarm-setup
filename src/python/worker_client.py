@@ -39,7 +39,7 @@ try:
 except Exception:  # GPU monitoring is optional
     GPUtil = None
 
-VERSION = "2.3.1"
+VERSION = "2.3.2"
 ALLOWED_ENGINES = {"CYCLES", "BLENDER_EEVEE", "BLENDER_EEVEE_NEXT", "BLENDER_WORKBENCH"}
 FRAME_RE = re.compile(r"Fra:(\d+)")
 
@@ -236,6 +236,37 @@ def inspect_project_zip(archive: Path):
             return total_size, scenes[0].filename
     except (zipfile.BadZipFile, EOFError, OSError, zlib.error) as exc:
         raise RuntimeError(f"Invalid project ZIP: {exc}") from exc
+
+
+def cycles_gpu_setup_expression() -> str:
+    script = """
+import bpy
+
+scene = bpy.context.scene
+preferences = bpy.context.preferences.addons["cycles"].preferences
+device_types = {item[0] for item in preferences.get_device_types(bpy.context)}
+selected_backend = None
+for backend in ("OPTIX", "CUDA", "HIP", "ONEAPI", "METAL"):
+    if backend not in device_types:
+        continue
+    try:
+        preferences.compute_device_type = backend
+        preferences.get_devices()
+    except Exception:
+        continue
+    if any(device.type == backend for device in preferences.devices):
+        selected_backend = backend
+        break
+
+if selected_backend is None:
+    raise RuntimeError("GPU rendering was requested, but Blender detected no supported Cycles GPU.")
+
+for device in preferences.devices:
+    device.use = device.type == selected_backend
+scene.cycles.device = "GPU"
+print("BlendSwarm selected Cycles GPU backend: " + selected_backend)
+"""
+    return "exec({!r})".format(script)
 
 
 def safe_extract(archive: Path, dest: Path) -> Path:
@@ -512,11 +543,11 @@ class Worker:
         engine = str(settings.get("engine", "")).upper()
         if engine in ALLOWED_ENGINES:
             cmd += ["-E", engine]
+        if job.get("requires_gpu") and engine == "CYCLES":
+            cmd += ["--python-expr", cycles_gpu_setup_expression()]
         if settings.get("format") in {"PNG", "JPEG", "OPEN_EXR", "TIFF"}:
             cmd += ["-F", settings["format"]]
         cmd += ["-s", str(start), "-e", str(end), "-a"]
-        if job.get("requires_gpu"):
-            cmd += ["--", "--cycles-device", "OPTIX,CUDA,HIP,METAL"]
         logger.info("Running: %s", " ".join(cmd))
 
         self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)

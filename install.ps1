@@ -5,7 +5,8 @@ param(
     [Parameter(Mandatory = $true)][string]$Server,
     [string]$Token,
     [string]$DiscoveryCode,
-    [string]$Dir = "$env:USERPROFILE\.blendswarm-worker"
+    [string]$Dir = "$env:USERPROFILE\.blendswarm-worker",
+    [switch]$AutoStart
 )
 $ErrorActionPreference = "Stop"
 $Server = $Server.TrimEnd('/')
@@ -116,3 +117,27 @@ Write-Host ""
 Write-Host "BlendSwarm worker installed to $Dir"
 Write-Host "Benchmark: & `"$runFile`" --test"
 Write-Host "Start:     & `"$runFile`""
+
+if ($AutoStart) {
+    $taskName = "BlendSwarmWorker"
+    $userId = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $powerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+    $actionArguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}"' -f $runFile
+    $action = New-ScheduledTaskAction -Execute $powerShell -Argument $actionArguments -WorkingDirectory $Dir
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $userId
+    $principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -RunLevel Limited
+    $settings = New-ScheduledTaskSettingsSet `
+        -StartWhenAvailable `
+        -RestartCount 3 `
+        -RestartInterval (New-TimeSpan -Minutes 1) `
+        -MultipleInstances IgnoreNew
+    Register-ScheduledTask `
+        -TaskName $taskName `
+        -Action $action `
+        -Trigger $trigger `
+        -Principal $principal `
+        -Settings $settings `
+        -Description "Starts the BlendSwarm worker at sign-in; the worker pauses while this computer is busy." `
+        -Force | Out-Null
+    Write-Host "Automatic start is enabled at Windows sign-in (task: $taskName)."
+}

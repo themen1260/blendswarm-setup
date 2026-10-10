@@ -30,6 +30,14 @@ class BuildReleaseTests(unittest.TestCase):
                     b"--enroll-only",
                     archive.read("blendswarm-worker/worker_client.py"),
                 )
+                self.assertIn(
+                    b"New-ScheduledTaskTrigger -AtLogOn",
+                    archive.read("blendswarm-worker/install.ps1"),
+                )
+                self.assertIn(
+                    b"Start the worker automatically",
+                    archive.read("blendswarm-worker/start-worker.ps1"),
+                )
 
             with tarfile.open(linux, "r:gz") as archive:
                 linux_files = set(archive.getnames())

@@ -20,7 +20,10 @@ installer on each computer with `-DiscoveryCode CODE` (Windows) or
 `--discovery-code CODE` (Linux). The code expires after 15 minutes and can
 register up to 10 computers. Share it only with machines you control. The
 website cannot scan private LAN traffic; each computer must run the installer
-to enroll and appear in the dashboard.
+to enroll and appear in the dashboard. Use `-AutoStart` on Windows and
+`--service` on Linux to install a background worker that starts automatically;
+the worker still waits for five minutes of low CPU/GPU use before accepting
+jobs.
 
 ## Windows quick start
 
@@ -31,11 +34,16 @@ to enroll and appear in the dashboard.
 3. Double-click `start-worker.cmd`.
 4. Enter the server URL (press Enter for `https://blendswarm.com`) and paste
    your worker token at the hidden prompt.
-5. Optionally run the Blender benchmark. Keep the PowerShell window open while
-   the worker is online; press Ctrl+C to stop it.
+5. Optionally run the Blender benchmark. Choose automatic start at Windows
+   sign-in when prompted to register a background worker task with restart-on-
+   failure. Otherwise, keep the PowerShell window open while the worker is
+   online; press Ctrl+C to stop it.
 
 The Windows installer stores the token encrypted for the current Windows
 account and does not put it in the worker process command line.
+The scheduled worker runs as the same signed-in user so Windows can decrypt
+that credential. It uses idle-aware scheduling and pauses new assignments
+until CPU/GPU usage stays low for five minutes.
 
 ## Linux quick start
 
@@ -77,6 +85,16 @@ sudo loginctl enable-linger "$USER"
 
 The Linux installer stores the token in a user-only `0600` environment file.
 The service runs as the installing user and does not require root.
+The service restarts automatically after failures and uses idle-aware
+scheduling. If it must start before the first interactive login on a headless
+machine, enable systemd lingering for that Linux account as shown above.
+
+Workers can accept GPU jobs only while the worker app is connected and the
+machine is available. The server cannot wake a powered-off or sleeping PC.
+Use the BlendSwarm worker monitor to verify that the worker reports its GPU and
+is online/available before expecting immediate GPU dispatch. For Cycles GPU
+jobs, the worker selects an installed Blender GPU backend and fails clearly if
+Blender cannot detect a compatible device rather than silently rendering on CPU.
 
 ## Run from source
 
