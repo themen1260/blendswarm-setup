@@ -2,6 +2,7 @@ BlendSwarm worker bundle
 ========================
 
 This bundle contains the BlendSwarm worker client and its installer, not Blender.
+Download the current Windows or Linux bundle from https://blendswarm.com/setup.
 It runs Blender Cycles/Eevee jobs on Windows or Linux PCs; Android/iOS are not
 supported. Install Blender 3.6+ and Python 3.9+ before setup:
   Blender: https://www.blender.org/download/

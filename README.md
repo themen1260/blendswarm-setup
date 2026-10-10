@@ -24,8 +24,8 @@ to enroll and appear in the dashboard.
 
 ## Windows quick start
 
-1. Download and extract `blendswarm-worker-windows.zip` from the repository's
-   [latest release](https://github.com/themen1260/blendswarm-setup/releases/latest).
+1. Download and extract the current Windows bundle from the official
+   [BlendSwarm worker setup page](https://blendswarm.com/setup).
 2. Install Python 3.9+ and Blender 3.6+. Enable Python's **Add Python to PATH**
    option during installation.
 3. Double-click `start-worker.cmd`.
@@ -39,8 +39,8 @@ account and does not put it in the worker process command line.
 
 ## Linux quick start
 
-1. Download and extract `blendswarm-worker-linux.tar.gz` from the
-   [latest release](https://github.com/themen1260/blendswarm-setup/releases/latest).
+1. Download and extract the current Linux bundle from the official
+   [BlendSwarm worker setup page](https://blendswarm.com/setup).
 2. Install Blender 3.6+, Python 3.9+, `python3-venv`, and `curl`.
 3. In the extracted directory, run:
 
