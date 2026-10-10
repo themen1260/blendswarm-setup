@@ -17,13 +17,16 @@ import platform
 import re
 import shutil
 import signal
+import stat
 import socket
 import subprocess
 import sys
 import tempfile
 import time
+import zlib
 import zipfile
 from pathlib import Path
+from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any, Dict, Optional
 
 import psutil
@@ -36,7 +39,7 @@ try:
 except Exception:  # GPU monitoring is optional
     GPUtil = None
 
-VERSION = "2.3.0"
+VERSION = "2.3.1"
 ALLOWED_ENGINES = {"CYCLES", "BLENDER_EEVEE", "BLENDER_EEVEE_NEXT", "BLENDER_WORKBENCH"}
 FRAME_RE = re.compile(r"Fra:(\d+)")
 
@@ -45,6 +48,8 @@ logger = logging.getLogger("worker")
 
 MAGIC = b"RSE1"
 MIN_RAM_FREE = 512 * 1024 * 1024
+MAX_INPUT_SIZE = 10 * 1024 * 1024 * 1024
+MAX_ARCHIVE_ENTRIES = 20_000
 IDLE_CPU_LIMIT_PERCENT = 30.0
 IDLE_GPU_LIMIT_PERCENT = 20.0
 IDLE_CONFIRMATION_SECONDS = 300
@@ -179,14 +184,76 @@ def enroll_worker(server: str, code: str) -> str:
     return token
 
 
-def safe_extract(archive: Path, dest: Path) -> None:
+def inspect_project_zip(archive: Path):
+    try:
+        with zipfile.ZipFile(archive) as zf:
+            members = zf.infolist()
+            if not members or len(members) > MAX_ARCHIVE_ENTRIES:
+                raise RuntimeError("Project ZIP is empty or contains too many entries")
+            total_size = 0
+            seen = set()
+            scenes = []
+            for member in members:
+                name = member.filename
+                posix = PurePosixPath(name)
+                windows = PureWindowsPath(name)
+                if (
+                    not name
+                    or "\x00" in name
+                    or "\\" in name
+                    or posix.is_absolute()
+                    or windows.is_absolute()
+                    or windows.drive
+                    or not posix.parts
+                    or any(part in (".", "..") for part in posix.parts)
+                ):
+                    raise RuntimeError(f"Unsafe path in project ZIP: {name}")
+                normalized = posix.as_posix().casefold()
+                if normalized in seen:
+                    raise RuntimeError(f"Duplicate path in project ZIP: {name}")
+                seen.add(normalized)
+                mode = (member.external_attr >> 16) & 0xFFFF
+                file_type = stat.S_IFMT(mode)
+                if file_type not in (0, stat.S_IFREG, stat.S_IFDIR):
+                    raise RuntimeError(f"Links and special files are not allowed in project ZIP: {name}")
+                if member.flag_bits & 0x1:
+                    raise RuntimeError("Password-protected project ZIP files are not supported")
+                if member.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+                    raise RuntimeError("Project ZIP uses an unsupported compression format")
+                if member.is_dir():
+                    continue
+                total_size += member.file_size
+                if total_size > MAX_INPUT_SIZE:
+                    raise RuntimeError("Project ZIP expands beyond the supported size limit")
+                if posix.suffix.lower() == ".blend":
+                    scenes.append(member)
+            if len(scenes) != 1:
+                raise RuntimeError("Project ZIP must contain exactly one .blend scene")
+            with zf.open(scenes[0]) as blend:
+                header = blend.read(12)
+            if len(header) != 12 or not header.startswith(b"BLENDER"):
+                raise RuntimeError("Project ZIP contains an invalid .blend scene")
+            return total_size, scenes[0].filename
+    except (zipfile.BadZipFile, EOFError, OSError, zlib.error) as exc:
+        raise RuntimeError(f"Invalid project ZIP: {exc}") from exc
+
+
+def safe_extract(archive: Path, dest: Path) -> Path:
     dest = dest.resolve()
+    _, scene_name = inspect_project_zip(archive)
+    dest.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(archive) as zf:
         for member in zf.infolist():
             target = (dest / member.filename).resolve()
             if dest != target and dest not in target.parents:
                 raise RuntimeError(f"Unsafe path in archive: {member.filename}")
-        zf.extractall(dest)
+            if member.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(member) as source, target.open("xb") as output:
+                shutil.copyfileobj(source, output, length=1024 * 1024)
+    return (dest / scene_name).resolve()
 
 
 class Worker:
@@ -367,6 +434,29 @@ class Worker:
         logger.warning("Decrypting on disk instead of RAM: %s", reason)
         return Path(tempfile.mkdtemp(prefix=f"rs_job_{job_id}_", dir=self.workdir))
 
+    def prepare_archive_space(self, job_id: int, job_dir: Path, archive: Path, expanded_size: int):
+        ram = ram_root()
+        current_free = shutil.disk_usage(job_dir).free
+        if current_free >= expanded_size + MIN_RAM_FREE:
+            return job_dir
+        if ram is not None and job_dir.parent == ram:
+            if self.require_ram:
+                raise RuntimeError(
+                    f"RAM disk cannot safely unpack this ZIP ({current_free // 2**20} MB free, "
+                    f"{expanded_size // 2**20} MB required)"
+                )
+            disk_free = shutil.disk_usage(self.workdir).free
+            if disk_free < expanded_size + MIN_RAM_FREE:
+                raise RuntimeError("Not enough free disk space to safely unpack this project ZIP")
+            logger.warning("Project ZIP is larger when unpacked; switching temporary files from RAM to disk")
+            new_dir = Path(tempfile.mkdtemp(prefix=f"rs_job_{job_id}_", dir=self.workdir))
+            shutil.move(str(archive), str(new_dir / archive.name))
+            shutil.rmtree(job_dir, ignore_errors=True)
+            return new_dir
+        if self.require_ram:
+            raise RuntimeError("--require-ram set but the RAM disk cannot safely unpack this ZIP")
+        raise RuntimeError("Not enough free space to safely unpack this project ZIP")
+
     def download_input(self, job: Dict[str, Any]):
         encrypted = bool(job.get("encrypted") and job.get("job_key"))
         params = {"chunk_id": job.get("chunk_id")}
@@ -392,15 +482,19 @@ class Worker:
                         for chunk in r.iter_content(1024 * 1024):
                             f.write(chunk)
             if src.suffix == ".zip":
+                expanded_size, _ = inspect_project_zip(src)
+                job_dir = self.prepare_archive_space(int(job["job_id"]), job_dir, src, expanded_size)
+                src = job_dir / src.name
                 scene_dir = job_dir / "scene"
-                safe_extract(src, scene_dir)
+                blend = safe_extract(src, scene_dir)
                 src.unlink(missing_ok=True)
-                blends = sorted(scene_dir.rglob("*.blend"), key=lambda p: len(p.parts))
-                if not blends:
-                    raise RuntimeError("No .blend file found in the uploaded archive")
-                return job_dir, blends[0]
+                return job_dir, blend
             if src.suffix != ".blend":
                 raise RuntimeError(f"Unsupported input type {src.suffix}; upload a .blend or a .zip containing one")
+            with src.open("rb") as source:
+                header = source.read(12)
+                if len(header) != 12 or not header.startswith(b"BLENDER"):
+                    raise RuntimeError("Uploaded .blend file is invalid")
             return job_dir, src
         except BaseException:
             if job_dir is not None:

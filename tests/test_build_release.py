@@ -41,6 +41,8 @@ class BuildReleaseTests(unittest.TestCase):
             with zipfile.ZipFile(source) as archive:
                 source_files = set(archive.namelist())
             self.assertIn("blendswarm-setup/src/python/worker_client.py", source_files)
+            self.assertIn("blendswarm-setup/tests/test_project_archive.py", source_files)
+            self.assertIn("blendswarm-setup/tests/test_idle_gate.py", source_files)
             for artifact in artifacts:
                 checksum_file = artifact.with_suffix(artifact.suffix + ".sha256")
                 expected, filename = checksum_file.read_text(encoding="ascii").split()

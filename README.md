@@ -148,7 +148,9 @@ python scripts/build_release.py --output dist
 
 The service supports CPU-only and GPU workers. It receives assigned render
 chunks, renders them with the locally installed Blender, and uploads results to
-the server. It is not a mobile/Android/iOS worker.
+the server. ZIP uploads are validated before extraction; archives must contain
+one valid `.blend` scene and cannot include unsafe paths, links, encrypted
+entries, or unsupported compression. It is not a mobile/Android/iOS worker.
 
 ## License
 

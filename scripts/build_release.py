@@ -56,10 +56,10 @@ def build(output_dir: Path) -> list[Path]:
             ROOT / "README.md",
             ROOT / "LICENSE",
             ROOT / "scripts/build_release.py",
-            ROOT / "tests/test_build_release.py",
-            ROOT / "tests/test_worker_discovery.py",
             ROOT / ".github/workflows/worker.yml",
         ):
+            archive.write(path, arcname=f"blendswarm-setup/{path.relative_to(ROOT)}")
+        for path in sorted((ROOT / "tests").rglob("*.py")):
             archive.write(path, arcname=f"blendswarm-setup/{path.relative_to(ROOT)}")
         for path in sorted((ROOT / "src").rglob("*.py")):
             archive.write(path, arcname=f"blendswarm-setup/{path.relative_to(ROOT)}")
